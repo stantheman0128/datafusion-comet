@@ -196,10 +196,10 @@ class CometCastCollatedStringSuite extends CometTestBase {
 
   // ---- end to end -----------------------------------------------------------------
   //
-  // The matrix above only exercises `isSupported`. These four run a query and pin down what the
-  // planner actually does with the answer, which is what #4489 asked for. A plain-string Parquet
-  // column with `COLLATE` applied on top reaches the cast as a collated child, the same shape
-  // the datetime tests in `CometCollationSuite` rely on. The cast child has to be a column
+  // The matrix above only exercises `isSupported`. The tests below run a query and pin down what
+  // the planner actually does with the answer, which is what #4489 asked for. A plain-string
+  // Parquet column with `COLLATE` applied on top reaches the cast as a collated child, the same
+  // shape the datetime tests in `CometCollationSuite` rely on. The cast child has to be a column
   // rather than a literal, since `getSupportLevel` folds literal children before `isSupported`
   // is consulted.
 
@@ -267,6 +267,33 @@ class CometCastCollatedStringSuite extends CometTestBase {
         checkSparkAnswerAndOperator(
           "SELECT CAST(struct(_2 AS a, _1 COLLATE utf8_lcase AS s) AS " +
             "STRUCT<a: STRING, s: STRING COLLATE UTF8_LCASE>) FROM collated_cast_tbl")
+      }
+    }
+  }
+
+  test("a multi-key sort above a dispatched struct cast keeps the collation order") {
+    // Moving the struct cast into the dispatcher also lets the operators above it into Comet, so
+    // they have to respect the collation as well. Before the fix for #6158, a local sort on the
+    // struct plus a second key took the multi-key path of `CometSortExec`, which compares
+    // strings by raw bytes. That fix sends sorts on collated keys back to Spark instead. The
+    // test checks the result only, so it holds wherever the sort runs. Under UTF8_LCASE 'a'
+    // sorts before 'B' and by raw bytes it sorts after, so the two rows swap if the sort ignores
+    // the collation. One Parquet file keeps both rows in one partition, which is what makes
+    // `SORT BY` order them against each other.
+    withTempPath { dir =>
+      spark
+        .createDataFrame(Seq(("a", 1, 0), ("B", 1, 1)))
+        .toDF("s", "a", "id")
+        .coalesce(1)
+        .write
+        .parquet(dir.getCanonicalPath)
+      withParquetTable(dir.getCanonicalPath, "collated_sort_tbl") {
+        withSQLConf(CometConf.COMET_SCALA_UDF_CODEGEN_ENABLED.key -> "true") {
+          checkSparkAnswer(
+            "SELECT CAST(struct(a AS a, s COLLATE utf8_lcase AS s) AS " +
+              "STRUCT<a: STRING, s: STRING COLLATE UTF8_LCASE>) AS st, id " +
+              "FROM collated_sort_tbl SORT BY st, id")
+        }
       }
     }
   }
